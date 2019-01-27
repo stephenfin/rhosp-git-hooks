@@ -1,0 +1,104 @@
+#!/usr/bin/env python
+
+"""Pre-receive hook for 'rhos-N.0-rhelM' branches.
+
+- https://git-scm.com/docs/githooks#pre-receive
+
+"""
+
+from __future__ import print_function
+
+import fileinput
+import re
+import subprocess
+import sys
+
+import requests
+
+BUG_URL = 'https://bugzilla.redhat.com/rest/bug/%d?include_fields=target_release'  # noqa
+RESOLVES_RE = re.compile(r'^Resolves: rhbz#(\d*)$', re.MULTILINE)
+VERSION_RE = re.compile(r'\d+\.\d')
+
+
+def validate_ref(old_rev, new_rev, ref):
+    # when you create or delete a ref, the old or new rev equals 40 zeroes
+    # respectively
+    branch_created = old_rev == '0' * 40
+    branch_deleted = new_rev == '0' * 40
+
+    if branch_created or branch_deleted:
+        # we don't care if a branch is being deleted or created - only for
+        # patches to new branches
+        print('Deleting or creating a branch. Ignoring')
+        return
+
+    if 'private' in ref:
+        # we also don't care about private branches
+        print('Private branch. Ignoring')
+        return
+
+    commits = subprocess.check_output([
+        'git', 'rev-list', old_rev + '..' + new_rev]).strip()
+
+    if not commits:
+        # force push and yes, you guessed it, we don't care
+        print('Force push. Ignoring')
+        return
+
+    for commit in commits.split('\n'):
+        # this returns headers, followed by a empty line, then the message, so
+        # we strip the headers
+        message = subprocess.check_output([
+            'git', 'cat-file', 'commit', commit]).split('\n\n', 1)[1]
+
+        match = RESOLVES_RE.search(message)
+        if not match:
+            print('Commit %s does not include the required "Resolves:" '
+                  'footer. Modify your commit to add this.' % commit[:8])
+            sys.exit(1)
+
+        bug_id = int(match.group(1))
+        req = requests.get(BUG_URL % bug_id)
+
+        if req.status_code == 401:
+            print('Bug %d, referenced by commit %s, is private. You will '
+                  'have to match the bug to the release manually.' % (
+                    bug_id, commit))
+            return
+
+        if req.status_code == 404:
+            print('Bug %d, referenced by commit %s, does not exist. Typo?' % (
+                    bug_id, commit))
+            sys.exit(1)
+
+        branch_version = VERSION_RE.search(ref).group(0)
+        bug_versions = []
+
+        target_releases = req.json()['bugs'][0]['target_release']
+        if not target_releases or target_releases[0] == '---':
+            print('Bug %d, referenced by commit %s, does not have a target '
+                  'release set. This must be set first.' % (
+                    bug_id, commit))
+            sys.exit(1)
+
+        for target_release in target_releases:
+            bug_version = VERSION_RE.search(target_release).group(0)
+            bug_versions.append(bug_version)
+            if bug_version == branch_version:
+                return
+
+        print('This patch is for OSP %s yet bug %d is for version(s) %s. '
+              'Update the bug target release then try again' % (
+                branch_version, bug_id, ', '.join(bug_versions)))
+        sys.exit(1)
+
+
+def main():
+    for line in fileinput.input():
+        # format: "<old-value> <new-value> <ref-name>"
+        old_rev, new_rev, ref = line.strip().split()
+        validate_ref(old_rev, new_rev, ref)
+
+
+if __name__ == '__main__':
+    main()
