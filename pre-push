@@ -87,7 +87,7 @@ def validate_commit(commit, branch_version):
 def validate_push(local_ref, local_sha1, remote_ref, remote_sha1):
 
     if not remote_ref.endswith('-patches'):
-        # we also care about anything that isn't a '-patches' branch
+        # we don't care about anything that isn't a '-patches' branch
         print('Not a `-patches` branch. Ignoring')
         return
 
